@@ -9,13 +9,20 @@ const { rjust, sleep, resize, noalpha, getpixel, hexlify, unhexlify } = require(
 class Pixoo
 {
 	CMD_SET_SYSTEM_BRIGHTNESS = 0x74;
-	CMD_SPP_SET_USER_GIF = 0xb1;
-	CMD_DRAWING_ENCODE_PIC = 0x5b;
+	CMD_SPP_SET_USER_GIF = 0xB1;
+	CMD_DRAWING_ENCODE_PIC = 0x5B;
 
-	BOX_MODE_CLOCK = 0;
-	BOX_MODE_TEMP = 1;
-	BOX_MODE_COLOR = 2;
-	BOX_MODE_SPECIAL = 3;
+	BOX_MODE_OFF = 0x99;
+	BOX_MODE_CLOCK = 0x00;
+	BOX_MODE_TEMP = 0x01;
+	BOX_MODE_COLOR = 0x02;
+	BOX_MODE_SPECIAL = 0x03;
+	BOX_MODE_EQUALIZER = 0x03;
+
+	BOX_VISUAL_CLOCK_US = 0x00;
+	BOX_VISUAL_CLOCK_ISO = 0x01;
+	BOX_VISUAL_TEMP_DEGREES = 0x00;
+	BOX_VISUAL_TEMP_FAHRENHEIT = 0x01;
 
 	size = 16;
 	last = { path: '', raw: null, data: null };
@@ -45,7 +52,7 @@ class Pixoo
 
 	__spp_frame_checksum( args )
 	{
-		return ( args.slice( 1 ).reduce( ( a, b ) => a + b, 0 ) & 0xffff );
+		return ( args.slice( 1 ).reduce( ( a, b ) => a + b, 0 ) & 0xFFFF );
 	}
 
 	__spp_frame_encode( cmd, args )
@@ -53,7 +60,7 @@ class Pixoo
 		let payload_size = ( args.length + 3 );
 
 		// create our header
-		let frame_header = [ 1, ( payload_size & 0xff ), ( ( payload_size >> 8 ) & 0xff ), cmd ];
+		let frame_header = [ 1, ( payload_size & 0xFF ), ( ( payload_size >> 8 ) & 0xFF ), cmd ];
 
 		// concatenate our args (byte array)
 		let frame_buffer = frame_header.concat( args );
@@ -62,7 +69,7 @@ class Pixoo
 		let cs = this.__spp_frame_checksum( frame_buffer );
 
 		// create our suffix (including checksum)
-		let frame_suffix = [ cs & 0xff, ( cs >> 8 ) & 0xff, 2 ];
+		let frame_suffix = [ cs & 0xFF, ( cs >> 8 ) & 0xFF, 2 ];
 
 		// return output buffer
 		return ( frame_buffer.concat( frame_suffix ) );
@@ -77,17 +84,24 @@ class Pixoo
 
 	set_system_brightness( brightness )
 	{
-		this.__send( this.CMD_SET_SYSTEM_BRIGHTNESS, [ ( brightness & 0xff ) ] );
+		this.__send( this.CMD_SET_SYSTEM_BRIGHTNESS, [ ( brightness & 0xFF ) ] );
 	}
 
-	set_box_mode( boxmode, visual = 0, mode = 0 )
+	set_box_mode( boxmode, visual = 0x00, more = [] )
 	{
-		this.__send( 0x45, [ ( boxmode & 0xff ), ( visual & 0xff ), ( mode & 0xff ) ] );
+		if ( boxmode == this.BOX_MODE_OFF )
+			return ( this.set_system_brightness( 0x00 ) );
+
+		let data = [ ( boxmode & 0xFF ), ( visual & 0xFF ) ];
+		for ( let part in more )
+			data.push( part & 0xFF );
+
+		this.__send( 0x45, data );
 	}
 
 	set_color( r, g, b )
 	{
-		this.__send( 0x6f, [ ( r & 0xff ), ( g & 0xff ), ( b & 0xff ) ] );
+		this.__send( 0x6F, [ ( r & 0xFF ), ( g & 0xFF ), ( b & 0xFF ) ] );
 	}
 
 	encode_image( filepath, index = 0, subindex = 0 )
@@ -250,11 +264,11 @@ class Pixoo
 			// encode frames
 			do
 			{
-				let nb_colors, palette, pixel_data, notimecode;
+				let nb_colors, palette, pixel_data, notimecode, nospeed;
 				[ nb_colors, palette, pixel_data, len, notimecode, nospeed ] = this.encode_image( filepath, index );
 
 				let frame_size = ( 7 + pixel_data.length + palette.length );
-				let frame_header = [ 0xAA, ( frame_size & 0xff ), ( ( frame_size >> 8 ) & 0xff ), ( timecode & 0xff ), ( ( timecode >> 8 ) & 0xff ), 0, nb_colors ];
+				let frame_header = [ 0xAA, ( frame_size & 0xFF ), ( ( frame_size >> 8 ) & 0xFF ), ( timecode & 0xFF ), ( ( timecode >> 8 ) & 0xFF ), 0, nb_colors ];
 				let frame = frame_header.concat( palette ).concat( pixel_data );
 				frames = frames.concat( frame );
 				timecode += ( speed ? speed : notimecode );
@@ -265,7 +279,7 @@ class Pixoo
 			let nchunks = Math.ceil( len / 200. );
 			for ( let i of [ ...Array( nchunks ).keys() ] )
 			{
-				let chunk = [ len & 0xff, ( len >> 8 ) & 0xff, i ];
+				let chunk = [ len & 0xFF, ( len >> 8 ) & 0xFF, i ];
 				this.__send( 0x49, chunk.concat( frames.slice( ( i * 200 ), ( ( i + 1 ) * 200 ) ) ) );
 				stop( false );
 			}
@@ -293,11 +307,11 @@ class Pixoo
 			// encode frames
 			do
 			{
-				let nb_colors, palette, pixel_data, notimecode;
-				[ nb_colors, palette, pixel_data, nolen, notimecode, nospeed ] = this.encode_image( filepaths[ index ], index );
+				let nb_colors, palette, pixel_data, nolen, notimecode, nospeed;
+				[ nb_colors, palette, pixel_data, nolen, notimecode, nospeed ] = this.encode_image( filepaths[ index ], 0, index );
 
 				let frame_size = ( 7 + pixel_data.length + palette.length );
-				let frame_header = [ 0xAA, ( frame_size & 0xff ), ( ( frame_size >> 8 ) & 0xff ), ( timecode & 0xff ), ( ( timecode >> 8 ) & 0xff ), 0, nb_colors ];
+				let frame_header = [ 0xAA, ( frame_size & 0xFF ), ( ( frame_size >> 8 ) & 0xFF ), ( timecode & 0xFF ), ( ( timecode >> 8 ) & 0xFF ), 0, nb_colors ];
 				let frame = frame_header.concat( palette ).concat( pixel_data );
 				frames = frames.concat( frame );
 				timecode += ( speed ? speed : 100 );
@@ -308,7 +322,7 @@ class Pixoo
 			let nchunks = Math.ceil( len / 200. );
 			for ( let i of [ ...Array( nchunks ).keys() ] )
 			{
-				let chunk = [ ( len & 0xff ), ( ( len >> 8 ) & 0xff ), i ];
+				let chunk = [ ( len & 0xFF ), ( ( len >> 8 ) & 0xFF ), i ];
 				this.__send( 0x49, chunk.concat( frames.slice( ( i * 200 ), ( ( i + 1 ) * 200 ) ) ) );
 				stop( false );
 			}
@@ -416,13 +430,12 @@ class Pixoo
 		try
 		{
 			let [ nb_colors, palette, pixel_data, length, timecode, speed ] = this.encode_image( filepath, index, subindex );
-			let prefix = [ 0x0, 0x0A, 0x0A, 0x04 ];
+			let prefix = [ 0x00, 0x0A, 0x0A, 0x04 ];
 			let frame_size = ( 7 + pixel_data.length + palette.length );
-			let frame_header = [ 0xAA, ( frame_size & 0xff ), ( ( frame_size >> 8 ) & 0xff ), 0, 0, 0, nb_colors ];
+			let frame_header = [ 0xAA, ( frame_size & 0xFF ), ( ( frame_size >> 8 ) & 0xFF ), 0, 0, 0, nb_colors ];
 
 			// encode frames
-			let frame = [];
-			frame = frame.concat( frame_header );
+			let frame = [].concat( frame_header );
 			for ( let color of palette )
 				frame = frame.concat( color );
 			frame = frame.concat( pixel_data );
@@ -522,6 +535,31 @@ if ( require.main === module )
 
 	//pixoo.size = ( 16 * scale );
 	pixoo.connect().then( () => {
+		/*
+		// Define the hour format
+		let iso = true;
+		let degrees = true;
+		let color = [ 0x00, 0x00, 0xFF ];
+
+		let year = 2020;
+		let month = 08;
+		let day = 08;
+		let hours = 08;
+		let minutes = 42;
+		let seconds = 00;
+
+		//pixoo.set_box_mode( Pixoo.BOX_MODE_CLOCK, ( iso ? Pixoo.BOX_VISUAL_CLOCK_ISO : Pixoo.BOX_VISUAL_CLOCK_US ) );
+		//pixoo.set_box_mode( Pixoo.BOX_MODE_TEMP, ( degrees ? Pixoo.BOX_VISUAL_TEMP_DEGREES : Pixoo.BOX_VISUAL_TEMP_FAHRENHEIT ) );
+		//pixoo.set_box_mode( Pixoo.BOX_MODE_TEMP, 0x00, color );
+		//pixoo.set_box_mode( 0x06, 0x00 ); // show stopwatch
+		//pixoo.set_box_mode( 0x07, 0x00 ); // show scoreboard
+		//pixoo.set_box_mode( Pixoo.BOX_MODE_COLOR, color[ 0 ], color.slice( 1 ) );
+		//pixoo.__send( 0x18, [ ( year % 100 ), parseInt( year / 100 ) ].concat( [ month, day, hours, minutes, seconds ] ) ); // set datetime
+		//pixoo.__send( 0x18, [ ( year % 100 ) * 100 + parseInt( year / 100 ) ].concat( [ month, day, hours, minutes, seconds ] ) ); // set datetime
+		//pixoo.set_box_mode( Pixoo.BOX_MODE_OFF );
+		pixoo.close();
+		*/
+
 		pixoo[ mode ]( files, error => { if ( error ) console.log( error ); pixoo.close(); }, speed, !noloop );
 	} );
 }
