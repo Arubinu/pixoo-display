@@ -1,0 +1,11 @@
+{
+  "name": "pixoo-display",
+  "version": "1.0.0",
+  "description": "This small script provides a way to communicate with a Divoom Pixoo over Bluetooth.",
+  "main": "pixoo.js",
+  "author": "Alvin Pergens",
+  "dependencies": {
+    "bluetooth-serial-port": "^2.2.7",
+    "decode-gif": "^1.0.1"
+  }
+}
