@@ -3,51 +3,45 @@
 const fs = require( 'fs' );
 const DecodeGIF = require( 'decode-gif' );
 
-const { getDevices, connect, write, close } = require( './lib/bluetooth' );
+const { Bluetooth } = require( './lib/bluetooth' );
 const { rjust, sleep, resize, noalpha, getpixel, hexlify, unhexlify } = require( './lib/util' );
 
 class Pixoo
 {
 	CMD_SET_SYSTEM_BRIGHTNESS = 0x74;
+	CMD_SET_SYSTEM_DATETIME = 0x18;
+	CMD_SET_SYSTEM_CLIMATE = 0x5F;
+	CMD_SET_SYSTEM_FULLDAY = 0x2D;
 	CMD_SPP_SET_USER_GIF = 0xB1;
 	CMD_DRAWING_ENCODE_PIC = 0x5B;
 
-	BOX_MODE_OFF = 0x99;
 	BOX_MODE_CLOCK = 0x00;
 	BOX_MODE_TEMP = 0x01;
 	BOX_MODE_COLOR = 0x02;
-	BOX_MODE_SPECIAL = 0x03;
-	BOX_MODE_EQUALIZER = 0x03;
+	BOX_MODE_EFFECTS = 0x03;
+	BOX_MODE_EQUALIZER = 0x04;
+	BOX_MODE_STOPWATCH = 0x06;
+	BOX_MODE_SCOREBOARD = 0x07;
 
 	BOX_VISUAL_CLOCK_US = 0x00;
 	BOX_VISUAL_CLOCK_ISO = 0x01;
 	BOX_VISUAL_TEMP_DEGREES = 0x00;
 	BOX_VISUAL_TEMP_FAHRENHEIT = 0x01;
 
-	size = 16;
-	last = { path: '', raw: null, data: null };
+	_size = 16;
 
 	constructor( mac_address )
 	{
-		this.btsock = undefined;
-		this.mac_address = mac_address;
+		this._last = { path: '', encoded: '', raw: null, data: null };
+		this._delay = { enabled: false, timeout: 0 };
+		this._btsock = new Bluetooth( mac_address );
+		this._update = null;
+		this._address = mac_address;
 	}
 
-	connect()
+	__little_hex( num )
 	{
-		var promise = connect( this.mac_address );
-		this.btsock = true;
-		return ( promise );
-	}
-
-	close()
-	{
-		try
-		{
-			close();
-			console.log( '\r[LOCAL]: Disonnected' );
-		}
-		catch ( e ) {}
+		return ( [ ( num & 0xFF ), ( ( num >> 8 ) & 0xFF ) ] )
 	}
 
 	__spp_frame_checksum( args )
@@ -60,7 +54,7 @@ class Pixoo
 		let payload_size = ( args.length + 3 );
 
 		// create our header
-		let frame_header = [ 1, ( payload_size & 0xFF ), ( ( payload_size >> 8 ) & 0xFF ), cmd ];
+		let frame_header = [ 0x01, ...this.__little_hex( payload_size ), cmd ];
 
 		// concatenate our args (byte array)
 		let frame_buffer = frame_header.concat( args );
@@ -69,7 +63,7 @@ class Pixoo
 		let cs = this.__spp_frame_checksum( frame_buffer );
 
 		// create our suffix (including checksum)
-		let frame_suffix = [ cs & 0xFF, ( cs >> 8 ) & 0xFF, 2 ];
+		let frame_suffix = [ ...this.__little_hex( cs ), 0x02 ];
 
 		// return output buffer
 		return ( frame_buffer.concat( frame_suffix ) );
@@ -78,8 +72,93 @@ class Pixoo
 	async __send( cmd, args )
 	{
 		let spp_frame = this.__spp_frame_encode( cmd, args );
-		if ( typeof( this.btsock ) !== 'undefined' )
-			await write( new Buffer.from( spp_frame ) );
+		if ( this._btsock.is_connected() )
+			await this._btsock.write( new Buffer.from( spp_frame ) );
+	}
+
+	connect()
+	{
+		return new Promise( ( resolve, reject ) => {
+			this._btsock.connect( this._address )
+				.then( msg => {
+					resolve( [ this, msg ] );
+				} )
+				.catch( msg => reject( [ this, msg ] ) );
+		} );
+	}
+
+	close()
+	{
+		try
+		{
+			this._btsock.close();
+			console.log( `\r[${this._address}]: Disonnected` );
+		}
+		catch ( e ) {}
+	}
+
+	get_last_frame()
+	{
+		let name = this._last.encoded;
+		if ( !this._last.raw || typeof( this._last.raw[ name ] ) === 'undefined' )
+			return ( null );
+
+		let [ palette, pixel_data, pixels, length, timecode, speed ] = this._last.raw[ name ];
+
+		let timecodes = [];
+		if ( this._last.data )
+		{
+			this._last.data.frames.forEach( frame => {
+				timecodes.push( frame.timeCode );
+			} );
+		}
+
+		return ( [ palette, [ pixels ], ( speed ? speed : timecodes ) ] );
+	}
+
+	set_update_callback( callback )
+	{
+		this._update = callback;
+	}
+
+	stop_delay()
+	{
+		this._delay.enabled = false;
+		clearTimeout( this._delay.timeout );
+	}
+
+	clear_frame( pixel = { r: 0, g: 0, b: 0, a: 0 } )
+	{
+		let data = [];
+		for ( let y = 0; y < this._size; ++y )
+		{
+			for ( let x = 0; x < this._size; ++x )
+				data.push( pixel );
+		}
+
+		// reset last datas
+		let name = 'clear';
+		this._last.path = name;
+		this._last.data = null;
+		this._last.raw = {};
+
+		// encode frame
+		this._last.raw[ name ] = this.encode_raw_image( {
+			speed:		0,
+			width:		this._size,
+			height:		this._size,
+			length:		1,
+			data:		data,
+			timecode:	0
+		} );
+		this._last.encoded = name;
+		let [ palette, pixel_data, pixels, length, timecode, speed ] = this._last.raw[ name ];
+		let frame = this.encode_frame( palette, pixel_data );
+
+		// send animation
+		this.__send( 0x44, [ 0x00, 0x0A, 0x0A, 0x04 ].concat( frame ) );
+		if ( this._update )
+			this._update( palette, [ pixels ] );
 	}
 
 	set_system_brightness( brightness )
@@ -87,14 +166,41 @@ class Pixoo
 		this.__send( this.CMD_SET_SYSTEM_BRIGHTNESS, [ ( brightness & 0xFF ) ] );
 	}
 
-	set_box_mode( boxmode, visual = 0x00, more = [] )
+	set_system_climate( temperature, weather )
 	{
-		if ( boxmode == this.BOX_MODE_OFF )
-			return ( this.set_system_brightness( 0x00 ) );
+		if ( temperature < 0 )
+			temperature = ( 256 + temperature );
 
+		this.__send( this.CMD_SET_SYSTEM_CLIMATE, [ ( temperature & 0xFF ), ( weather & 0xFF ) ] );
+	}
+
+	set_system_datetime( date, mode )
+	{
+		let year = date.getFullYear();
+		this.__send( this.CMD_SET_SYSTEM_DATETIME, [
+			( year % 100 ), parseInt( year / 100 ),
+			( date.getMonth() + 1 ),
+			date.getDate(),
+			date.getHours(),
+			date.getMinutes(),
+			date.getSeconds(),
+			0x00
+		] );
+
+		if ( typeof( mode ) !== 'undefined' )
+			pixoo.set_box_mode( Pixoo.BOX_MODE_CLOCK, mode );
+	}
+
+	set_system_fullday( mode )
+	{
+		this.__send( this.CMD_SET_SYSTEM_FULLDAY, [ ( mode & 0xFF ) ] );
+	}
+
+	set_box_mode( boxmode, visual = 0x00 )
+	{
 		let data = [ ( boxmode & 0xFF ), ( visual & 0xFF ) ];
-		for ( let part in more )
-			data.push( part & 0xFF );
+		for ( let arg in [ ...arguments ].slice( 2 ) )
+			data.push( arg & 0xFF );
 
 		this.__send( 0x45, data );
 	}
@@ -107,7 +213,7 @@ class Pixoo
 	encode_image( filepath, index = 0, subindex = 0 )
 	{
 		let data = null;
-		if ( filepath != this.last.path || !this.last.data )
+		if ( filepath != this._last.path || !this._last.data )
 		{
 			data = DecodeGIF( fs.readFileSync( filepath ) );
 
@@ -131,21 +237,21 @@ class Pixoo
 				frame.data = pixels;
 			}
 
-			this.last.path = filepath;
-			this.last.data = data;
-			this.last.raw = {};
+			this._last.path = filepath;
+			this._last.data = data;
+			this._last.raw = {};
 		}
 		else
-			data = this.last.data;
+			data = this._last.data;
 
 		let tindex = ( index.toString() + '-' + subindex.toString() );
-		if ( typeof( this.last.raw[ tindex ] ) === 'undefined' )
+		if ( typeof( this._last.raw[ tindex ] ) === 'undefined' )
 		{
 			let speed = 100;
 			if ( data.frames.length >= 2 )
 				speed = ( data.frames[ 1 ].timeCode - data.frames[ 0 ].timeCode );
 
-			this.last.raw[ tindex ] = this.encode_raw_image( {
+			this._last.raw[ tindex ] = this.encode_raw_image( {
 				speed:		speed,
 				width:		data.width,
 				height:		data.height,
@@ -155,19 +261,20 @@ class Pixoo
 			} );
 		}
 
-		return ( this.last.raw[ tindex ] );
+		this._last.encoded = tindex;
+		return ( this._last.raw[ tindex ] );
 	}
 
 	encode_raw_image( img )
 	{
 		// ensure image is square
 		if ( img.width != img.height )
-			return ( console.log( '\r[!] Image must be square.' ) );
+			throw new Error( 'Image must be square !' );
 
 		// resize if image is too big
-		if ( img.width != this.size )
+		if ( img.width != this._size )
 		{
-			img = resize( img, this.size );
+			img = resize( img, this._size );
 			if ( !img )
 				throw new Error( 'Please choose an image with a multiple resolution of 16x16 !' );
 		}
@@ -175,12 +282,12 @@ class Pixoo
 		// create palette and pixel array
 		let pixels = [];
 		let palette = [];
-		for ( let y of [ ...Array( this.size ).keys() ] )
+		for ( let y of [ ...Array( this._size ).keys() ] )
 		{
-			for ( let x of [ ...Array( this.size ).keys() ] )
+			for ( let x of [ ...Array( this._size ).keys() ] )
 			{
 				let r, g, b;
-				let pixel = img.data[ ( y * this.size ) + x ];
+				let pixel = img.data[ ( y * this._size ) + x ];
 				[ r, g, b ] = [ pixel.r, pixel.g, pixel.b ];
 
 				let idx = -1;
@@ -203,15 +310,16 @@ class Pixoo
 			}
 		}
 
-		console.log( '\r╔' + '═══'.repeat( this.size ).substr( 1 ) + '╗' );
+		let display = ( '\r╔' + '═══'.repeat( this._size ).substr( 1 ) + '╗\n' );
 		for ( let y of [ ...Array( img.height ).keys() ] )
 		{
 			let line = [];
 			for ( let x of [ ...Array( img.width ).keys() ] )
 				line.push( ( '0' + hexlify( pixels[ ( y * img.width ) + x ] ) ).slice( -2 ).replace( /0/g, ' ' ) );
-			console.log( '\r║' + line.join( '.' ) + '║' );
+			display += ( '\r║' + line.join( '.' ) + '║\n' );
 		}
-		console.log( '\r╚' + '═══'.repeat( this.size ).substr( 1 ) + '╝' );
+		display += ( '\r╚' + '═══'.repeat( this._size ).substr( 1 ) + '╝' );
+		console.log( `\r[${this._address}]: Display {${palette.length},${pixels.length}}\n${display}` );
 
 		// encode pixels
 		let bitwidth = Math.ceil( Math.log10( palette.length ) / Math.log10( 2 ) );
@@ -222,7 +330,7 @@ class Pixoo
 		let encoded_byte = '';
 		for ( let i of pixels )
 		{
-			encoded_byte = rjust( ( i >>> 0 ).toString( 2 ), bitwidth, '0' ) + encoded_byte;
+			encoded_byte = rjust( i.toString( 2 ), bitwidth, '0' ) + encoded_byte;
 			if ( encoded_byte.length >= 8 )
 			{
 				encoded_pixels.push( encoded_byte.slice( -8 ) );
@@ -238,7 +346,29 @@ class Pixoo
 		for ( let color of palette )
 			encoded_palette.push( color );
 
-		return ( [ palette.length, encoded_palette, encoded_data, img.length, img.timecode, img.speed ] );
+		if ( encoded_palette.length > 256 )
+			throw new Error( 'The color pallet cannot exceed 256 colors !' );
+
+		return ( [ encoded_palette, encoded_data, pixels, img.length, img.timecode, img.speed ] );
+	}
+
+	encode_frame( palette, pixel_data, timecode = 0x00, reset_palette = false )
+	{
+		let size = ( 7 + pixel_data.length + palette.length );
+		let header = [
+			0xAA,
+			...this.__little_hex( size ),
+			...this.__little_hex( timecode ),
+			( reset_palette ? 0x01 : 0x00 ),
+			( ( palette.length == 256 ) ? 0x00 : palette.length )
+		];
+
+		let frame = header;
+		for ( let color of palette )
+			frame = frame.concat( color );
+		frame = frame.concat( pixel_data );
+
+		return ( frame );
 	}
 
 	draw_gif( filepath, sent, speed = 0, loop = true, index = 0 )
@@ -246,7 +376,7 @@ class Pixoo
 		if ( Array.isArray( filepath ) )
 			filepath = filepath[ 0 ];
 
-		console.log( '\r[SEND]: GIF', filepath, speed );
+		console.log( `\r[${this._address}]: SEND GIF`, filepath, speed );
 
 		index = 0;
 		let len = 1;
@@ -262,16 +392,17 @@ class Pixoo
 		try
 		{
 			// encode frames
+			let pixel_datas = [];
 			do
 			{
-				let nb_colors, palette, pixel_data, notimecode, nospeed;
-				[ nb_colors, palette, pixel_data, len, notimecode, nospeed ] = this.encode_image( filepath, index );
+				let palette, pixel_data, notimecode, nospeed;
+				[ palette, pixel_data, pixels, len, notimecode, nospeed ] = this.encode_image( filepath, index );
+				let frame = this.encode_frame( palette, pixel_data, timecode );
 
-				let frame_size = ( 7 + pixel_data.length + palette.length );
-				let frame_header = [ 0xAA, ( frame_size & 0xFF ), ( ( frame_size >> 8 ) & 0xFF ), ( timecode & 0xFF ), ( ( timecode >> 8 ) & 0xFF ), 0, nb_colors ];
-				let frame = frame_header.concat( palette ).concat( pixel_data );
 				frames = frames.concat( frame );
 				timecode += ( speed ? speed : notimecode );
+
+				pixel_datas.push( pixels );
 			}
 			while ( ++index < len );
 
@@ -279,8 +410,11 @@ class Pixoo
 			let nchunks = Math.ceil( len / 200. );
 			for ( let i of [ ...Array( nchunks ).keys() ] )
 			{
-				let chunk = [ len & 0xFF, ( len >> 8 ) & 0xFF, i ];
+				let chunk = [ ...this.__little_hex( len ), i ];
 				this.__send( 0x49, chunk.concat( frames.slice( ( i * 200 ), ( ( i + 1 ) * 200 ) ) ) );
+				if ( this._update )
+					this._update( palette, pixel_datas );
+
 				stop( false );
 			}
 		}
@@ -289,7 +423,7 @@ class Pixoo
 
 	draw_anim( filepaths, sent, speed = 0, loop = true, index = 0 )
 	{
-		console.log( '\r[SEND]: ANIM', filepaths, speed );
+		console.log( `\r[${this._address}]: SEND ANIM`, filepaths, speed );
 
 		index = 0;
 		let len = filepaths.length;
@@ -305,16 +439,16 @@ class Pixoo
 		try
 		{
 			// encode frames
+			let pixel_datas = [];
 			do
 			{
-				let nb_colors, palette, pixel_data, nolen, notimecode, nospeed;
-				[ nb_colors, palette, pixel_data, nolen, notimecode, nospeed ] = this.encode_image( filepaths[ index ], 0, index );
+				let [ palette, pixel_data, pixels, nolen, notimecode, nospeed ] = this.encode_image( filepaths[ index ], 0, index );
+				let frame = this.encode_frame( palette, pixel_data, timecode );
 
-				let frame_size = ( 7 + pixel_data.length + palette.length );
-				let frame_header = [ 0xAA, ( frame_size & 0xFF ), ( ( frame_size >> 8 ) & 0xFF ), ( timecode & 0xFF ), ( ( timecode >> 8 ) & 0xFF ), 0, nb_colors ];
-				let frame = frame_header.concat( palette ).concat( pixel_data );
 				frames = frames.concat( frame );
 				timecode += ( speed ? speed : 100 );
+
+				pixel_datas.push( pixels );
 			}
 			while ( ++index < len );
 
@@ -322,8 +456,11 @@ class Pixoo
 			let nchunks = Math.ceil( len / 200. );
 			for ( let i of [ ...Array( nchunks ).keys() ] )
 			{
-				let chunk = [ ( len & 0xFF ), ( ( len >> 8 ) & 0xFF ), i ];
+				let chunk = [ ...this.__little_hex( len ), i ];
 				this.__send( 0x49, chunk.concat( frames.slice( ( i * 200 ), ( ( i + 1 ) * 200 ) ) ) );
+				if ( this._update )
+					this._update( palette, pixel_datas );
+
 				stop( false );
 			}
 		}
@@ -332,28 +469,35 @@ class Pixoo
 
 	draw_gif_delay( filepath, sent, speed = 0, loop = true, index = 0 )
 	{
+		if ( !( typeof( arguments[ 5 ] ) === 'boolean' && arguments[ 5 ] ) )
+		{
+			this._delay.enabled = false;
+			clearTimeout( this._delay.timeout );
+			this._delay = { enabled: true, timeout: 0 };
+		}
+
 		if ( Array.isArray( filepath ) )
 			filepath = filepath[ 0 ];
 
 		index = 0;
 		let length = 1;
-		let timeout = 0;
 		let stop = ( e, v ) => {
-			clearTimeout( timeout );
-			if ( e || !loop )
-			{
-				if ( sent )
-					sent( e, v );
+			this._delay.enabled = false;
+			clearTimeout( this._delay.timeout );
+			if ( sent )
+				sent( e, v );
 
-				sent = undefined;
-			}
+			sent = undefined;
 		};
 		let next = () => {
-			if ( index >= length )
+			if ( !this._delay.enabled || index >= length )
 			{
-				stop( false );
-				if ( loop )
-					return ( this.draw_gif_delay( filepath, sent, speed, loop ) );
+				if ( this._delay.enabled && loop )
+					this.draw_gif_delay( filepath, sent, speed, loop, 0, true );
+				else
+					stop( false );
+
+				return ;
 			}
 
 			this.draw_pic( filepath, ( error, nolength, nospeed ) => {
@@ -365,7 +509,7 @@ class Pixoo
 					speed = nospeed;
 
 				index += 1;
-				timeout = setTimeout( next, speed );
+				this._delay.timeout = setTimeout( next, speed );
 			}, undefined, undefined, index );
 		};
 
@@ -375,25 +519,32 @@ class Pixoo
 
 	draw_anim_delay( filepaths, sent, speed = 0, loop = true, index = 0 )
 	{
+		if ( !( typeof( arguments[ 5 ] ) === 'boolean' && arguments[ 5 ] ) )
+		{
+			this._delay.enabled = false;
+			clearTimeout( this._delay.timeout );
+			this._delay = { enabled: true, timeout: 0 };
+		}
+
 		index = 0;
 		let length = filepaths.length;
-		let timeout = 0;
 		let stop = ( e, v ) => {
-			clearTimeout( timeout );
-			if ( e || !loop )
-			{
-				if ( sent )
-					sent( e, v );
+			this._delay.enabled = false;
+			clearTimeout( this._delay.timeout );
+			if ( sent )
+				sent( e, v );
 
-				sent = undefined;
-			}
+			sent = undefined;
 		};
 		let next = () => {
-			if ( index >= length )
+			if ( !this._delay.enabled || index >= length )
 			{
-				stop( false );
-				if ( loop )
-					return ( this.draw_anim_delay( filepaths, sent, ( speed || 100 ), loop ) );
+				if ( this._delay.enabled && loop )
+					this.draw_anim_delay( filepaths, sent, ( speed || 100 ), loop, 0, true );
+				else
+					stop( false );
+
+				return ;
 			}
 
 			this.draw_pic( filepaths[ index ], ( error, nolength, nospeed ) => {
@@ -405,7 +556,7 @@ class Pixoo
 				//	speed = nospeed;
 
 				index += 1;
-				timeout = setTimeout( next, speed );
+				this._delay.timeout = setTimeout( next, speed );
 			} );
 		};
 
@@ -418,7 +569,7 @@ class Pixoo
 		if ( Array.isArray( filepath ) )
 			filepath = filepath[ 0 ];
 
-		console.log( '\r[SEND]: PIC', filepath, ( index ? index : '' ) );
+		console.log( `\r[${this._address}]: SEND PIC`, filepath, ( index ? index : '' ) );
 
 		let stop = ( e, l, s ) => {
 			if ( sent )
@@ -429,19 +580,14 @@ class Pixoo
 
 		try
 		{
-			let [ nb_colors, palette, pixel_data, length, timecode, speed ] = this.encode_image( filepath, index, subindex );
-			let prefix = [ 0x00, 0x0A, 0x0A, 0x04 ];
-			let frame_size = ( 7 + pixel_data.length + palette.length );
-			let frame_header = [ 0xAA, ( frame_size & 0xFF ), ( ( frame_size >> 8 ) & 0xFF ), 0, 0, 0, nb_colors ];
-
-			// encode frames
-			let frame = [].concat( frame_header );
-			for ( let color of palette )
-				frame = frame.concat( color );
-			frame = frame.concat( pixel_data );
+			// encode frame
+			let [ palette, pixel_data, pixels, length, timecode, speed ] = this.encode_image( filepath, index, subindex );
+			let frame = this.encode_frame( palette, pixel_data );
 
 			// send animation
-			this.__send( 0x44, prefix.concat( frame ) );
+			this.__send( 0x44, [ 0x00, 0x0A, 0x0A, 0x04 ].concat( frame ) );
+			if ( this._update )
+				this._update( palette, [ pixels ] );
 
 			stop( false, length, speed )
 		}
@@ -533,33 +679,11 @@ if ( require.main === module )
 		process.exit();
 	} );
 
+	//pixoo.size = 32;
 	//pixoo.size = ( 16 * scale );
 	pixoo.connect().then( () => {
-		/*
-		// Define the hour format
-		let iso = true;
-		let degrees = true;
-		let color = [ 0x00, 0x00, 0xFF ];
-
-		let year = 2020;
-		let month = 08;
-		let day = 08;
-		let hours = 08;
-		let minutes = 42;
-		let seconds = 00;
-
-		//pixoo.set_box_mode( Pixoo.BOX_MODE_CLOCK, ( iso ? Pixoo.BOX_VISUAL_CLOCK_ISO : Pixoo.BOX_VISUAL_CLOCK_US ) );
-		//pixoo.set_box_mode( Pixoo.BOX_MODE_TEMP, ( degrees ? Pixoo.BOX_VISUAL_TEMP_DEGREES : Pixoo.BOX_VISUAL_TEMP_FAHRENHEIT ) );
-		//pixoo.set_box_mode( Pixoo.BOX_MODE_TEMP, 0x00, color );
-		//pixoo.set_box_mode( 0x06, 0x00 ); // show stopwatch
-		//pixoo.set_box_mode( 0x07, 0x00 ); // show scoreboard
-		//pixoo.set_box_mode( Pixoo.BOX_MODE_COLOR, color[ 0 ], color.slice( 1 ) );
-		//pixoo.__send( 0x18, [ ( year % 100 ), parseInt( year / 100 ) ].concat( [ month, day, hours, minutes, seconds ] ) ); // set datetime
-		//pixoo.__send( 0x18, [ ( year % 100 ) * 100 + parseInt( year / 100 ) ].concat( [ month, day, hours, minutes, seconds ] ) ); // set datetime
-		//pixoo.set_box_mode( Pixoo.BOX_MODE_OFF );
-		pixoo.close();
-		*/
-
 		pixoo[ mode ]( files, error => { if ( error ) console.log( error ); pixoo.close(); }, speed, !noloop );
 	} );
 }
+else
+	module.exports.Pixoo = Pixoo
