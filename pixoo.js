@@ -79,12 +79,20 @@ class Pixoo
 	connect()
 	{
 		return new Promise( ( resolve, reject ) => {
+			if ( this.connected() )
+				return ( resolve( [ this, 'Already connected' ] ) );
+
 			this._btsock.connect( this._address )
 				.then( msg => {
 					resolve( [ this, msg ] );
 				} )
 				.catch( msg => reject( [ this, msg ] ) );
 		} );
+	}
+
+	connected()
+	{
+		return ( this._btsock.is_connected() );
 	}
 
 	close()

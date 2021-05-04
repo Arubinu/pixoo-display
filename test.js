@@ -23,6 +23,7 @@ pixoo.connect().then( () => {
 	let degrees = false; // or fahrenheit
 	let brightness = 5; // percent
 	//pixoo.set_system_climate( 42, 0 );
+	//pixoo.set_system_brightness( brightness );
 	//pixoo.set_box_mode( Pixoo.BOX_MODE_TEMP, 0x00, ...color );
 	//pixoo.set_box_mode( Pixoo.BOX_MODE_TEMP, ...color, ( degrees ? Pixoo.BOX_VISUAL_TEMP_DEGREES : Pixoo.BOX_VISUAL_TEMP_FAHRENHEIT ), 0x00 );
 	//pixoo.set_box_mode( Pixoo.BOX_MODE_TEMP, ...color, brightness, 0x00, 0x00, ...[ 0x00, 0x00, 0x00 ] );
