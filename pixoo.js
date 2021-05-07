@@ -2,9 +2,10 @@
 
 const fs = require( 'fs' );
 const DecodeGIF = require( 'decode-gif' );
+const ResizeGIF = require( '@gumlet/gif-resize' );
 
 const { Bluetooth } = require( './lib/bluetooth' );
-const { rjust, sleep, resize, noalpha, getpixel, hexlify, unhexlify } = require( './lib/util' );
+const { rjust, sleep, noalpha, getpixel, hexlify, unhexlify } = require( './lib/util' );
 
 class Pixoo
 {
@@ -86,7 +87,7 @@ class Pixoo
 				.then( msg => {
 					resolve( [ this, msg ] );
 				} )
-				.catch( msg => reject( [ this, msg ] ) );
+				.catch ( msg => reject( [ this, msg ] ) );
 		} );
 	}
 
@@ -102,7 +103,7 @@ class Pixoo
 			this._btsock.close();
 			console.log( `\r[${this._address}]: Disonnected` );
 		}
-		catch ( e ) {}
+		catch ( error ) {}
 	}
 
 	get_last_frame()
@@ -223,7 +224,15 @@ class Pixoo
 		let data = null;
 		if ( filepath != this._last.path || !this._last.data )
 		{
-			data = DecodeGIF( fs.readFileSync( filepath ) );
+			try
+			{
+				const buf = ResizeGIF.sync( { width: 16 } )( fs.readFileSync( filepath ) );
+				data = DecodeGIF( buf );
+			}
+			catch ( error )
+			{
+				throw new Error( error.message );
+			}
 
 			let multi = 0;
 			for ( let frame of data.frames )
@@ -278,14 +287,6 @@ class Pixoo
 		// ensure image is square
 		if ( img.width != img.height )
 			throw new Error( 'Image must be square !' );
-
-		// resize if image is too big
-		if ( img.width != this._size )
-		{
-			img = resize( img, this._size );
-			if ( !img )
-				throw new Error( 'Please choose an image with a multiple resolution of 16x16 !' );
-		}
 
 		// create palette and pixel array
 		let pixels = [];
@@ -599,7 +600,7 @@ class Pixoo
 
 			stop( false, length, speed )
 		}
-		catch( error ) { stop( error ); }
+		catch ( error ) { stop( error ); }
 	}
 }
 
@@ -670,7 +671,7 @@ if ( require.main === module )
 			}
 		}
 	}
-	catch( error ) {}
+	catch ( error ) {}
 
 	if ( man || !mode || !address || !files.length )
 	{

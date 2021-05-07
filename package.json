@@ -5,6 +5,7 @@
   "main": "pixoo.js",
   "author": "Alvin Pergens",
   "dependencies": {
+    "@gumlet/gif-resize": "github:Arubinu/gif-resize#synchronous-method",
     "bluetooth-serial-port": "^2.2.7",
     "decode-gif": "^1.0.1"
   }
