@@ -1,11 +1,10 @@
 // CTRL+Z > kill $(jobs -p | cut -d' ' -f 4) && fg
 
-const fs = require( 'fs' );
+const FS = require( 'fs' );
 const DecodeGIF = require( 'decode-gif' );
-const ResizeGIF = require( '@gumlet/gif-resize' );
 
 const { Bluetooth } = require( './lib/bluetooth' );
-const { rjust, sleep, noalpha, getpixel, hexlify, unhexlify } = require( './lib/util' );
+const { rjust, sleep, resize, noalpha, getpixel, hexlify, unhexlify } = require( './lib/util' );
 
 class Pixoo
 {
@@ -29,14 +28,16 @@ class Pixoo
 	BOX_VISUAL_TEMP_DEGREES = 0x00;
 	BOX_VISUAL_TEMP_FAHRENHEIT = 0x01;
 
-	_size = 16;
-
-	constructor( mac_address )
+	constructor( mac_address, size )
 	{
 		this._last = { path: '', encoded: '', raw: null, data: null };
+		this._size = ( size ? size : 16 );
 		this._delay = { enabled: false, timeout: 0 };
+		this._debug = true;
 		this._btsock = new Bluetooth( mac_address );
 		this._update = null;
+		this._interval = 0;
+		this._exception = [ true, null ];
 		this._address = mac_address;
 	}
 
@@ -72,15 +73,26 @@ class Pixoo
 
 	async __send( cmd, args )
 	{
-		let spp_frame = this.__spp_frame_encode( cmd, args );
-		if ( this._btsock.is_connected() )
-			await this._btsock.write( new Buffer.from( spp_frame ) );
+		try
+		{
+			let spp_frame = this.__spp_frame_encode( cmd, args );
+			if ( this._btsock.is_connected() )
+				await this._btsock.write( new Buffer.from( spp_frame ) );
+		}
+		catch ( error )
+		{
+			if ( this._exception[ 1 ] )
+				this._exception[ 1 ]( error );
+
+			if ( this._exception[ 0 ] )
+				throw ( error );
+		}
 	}
 
-	connect()
+	connect( force = false )
 	{
 		return new Promise( ( resolve, reject ) => {
-			if ( this.connected() )
+			if ( !force && this.connected() )
 				return ( resolve( [ this, 'Already connected' ] ) );
 
 			this._btsock.connect( this._address )
@@ -100,6 +112,7 @@ class Pixoo
 	{
 		try
 		{
+			clearInterval( this._interval );
 			this._btsock.close();
 			console.log( `\r[${this._address}]: Disonnected` );
 		}
@@ -125,9 +138,70 @@ class Pixoo
 		return ( [ palette, [ pixels ], ( speed ? speed : timecodes ) ] );
 	}
 
+	set_update_exception( enabled, callback )
+	{
+		this._exception[ 0 ] = enabled;
+		if ( typeof( callback ) !== 'undefined' )
+			this._exception[ 1 ] = callback;
+	}
+
 	set_update_callback( callback )
 	{
 		this._update = callback;
+	}
+
+	set_debug( debug )
+	{
+		this._debug = !!debug;
+	}
+
+	set_color( r, g, b )
+	{
+		this.__send( 0x6F, [ ( r & 0xFF ), ( g & 0xFF ), ( b & 0xFF ) ] );
+	}
+
+	set_box_mode( boxmode, visual = 0x00 )
+	{
+		let data = [ ( boxmode & 0xFF ), ( visual & 0xFF ) ];
+		for ( let arg in [ ...arguments ].slice( 2 ) )
+			data.push( arg & 0xFF );
+
+		this.__send( 0x45, data );
+	}
+
+	set_system_brightness( brightness )
+	{
+		this.__send( this.CMD_SET_SYSTEM_BRIGHTNESS, [ ( brightness & 0xFF ) ] );
+	}
+
+	set_system_climate( temperature, weather )
+	{
+		if ( temperature < 0 )
+			temperature = ( 256 + temperature );
+
+		this.__send( this.CMD_SET_SYSTEM_CLIMATE, [ ( temperature & 0xFF ), ( weather & 0xFF ) ] );
+	}
+
+	set_system_datetime( date, mode )
+	{
+		let year = date.getFullYear();
+		this.__send( this.CMD_SET_SYSTEM_DATETIME, [
+			( year % 100 ), parseInt( year / 100 ),
+			( date.getMonth() + 1 ),
+			date.getDate(),
+			date.getHours(),
+			date.getMinutes(),
+			date.getSeconds(),
+			0x00
+		] );
+
+		if ( typeof( mode ) !== 'undefined' )
+			this.set_box_mode( Pixoo.BOX_MODE_CLOCK, mode );
+	}
+
+	set_system_fullday( mode )
+	{
+		this.__send( this.CMD_SET_SYSTEM_FULLDAY, [ ( mode & 0xFF ) ] );
 	}
 
 	stop_delay()
@@ -170,55 +244,6 @@ class Pixoo
 			this._update( palette, [ pixels ] );
 	}
 
-	set_system_brightness( brightness )
-	{
-		this.__send( this.CMD_SET_SYSTEM_BRIGHTNESS, [ ( brightness & 0xFF ) ] );
-	}
-
-	set_system_climate( temperature, weather )
-	{
-		if ( temperature < 0 )
-			temperature = ( 256 + temperature );
-
-		this.__send( this.CMD_SET_SYSTEM_CLIMATE, [ ( temperature & 0xFF ), ( weather & 0xFF ) ] );
-	}
-
-	set_system_datetime( date, mode )
-	{
-		let year = date.getFullYear();
-		this.__send( this.CMD_SET_SYSTEM_DATETIME, [
-			( year % 100 ), parseInt( year / 100 ),
-			( date.getMonth() + 1 ),
-			date.getDate(),
-			date.getHours(),
-			date.getMinutes(),
-			date.getSeconds(),
-			0x00
-		] );
-
-		if ( typeof( mode ) !== 'undefined' )
-			pixoo.set_box_mode( Pixoo.BOX_MODE_CLOCK, mode );
-	}
-
-	set_system_fullday( mode )
-	{
-		this.__send( this.CMD_SET_SYSTEM_FULLDAY, [ ( mode & 0xFF ) ] );
-	}
-
-	set_box_mode( boxmode, visual = 0x00 )
-	{
-		let data = [ ( boxmode & 0xFF ), ( visual & 0xFF ) ];
-		for ( let arg in [ ...arguments ].slice( 2 ) )
-			data.push( arg & 0xFF );
-
-		this.__send( 0x45, data );
-	}
-
-	set_color( r, g, b )
-	{
-		this.__send( 0x6F, [ ( r & 0xFF ), ( g & 0xFF ), ( b & 0xFF ) ] );
-	}
-
 	encode_image( filepath, index = 0, subindex = 0 )
 	{
 		let data = null;
@@ -226,7 +251,7 @@ class Pixoo
 		{
 			try
 			{
-				const buf = ResizeGIF.sync( { width: 16 } )( fs.readFileSync( filepath ) );
+				const buf = resize( filepath, this._size );
 				data = DecodeGIF( buf );
 			}
 			catch ( error )
@@ -328,7 +353,8 @@ class Pixoo
 			display += ( '\r║' + line.join( '.' ) + '║\n' );
 		}
 		display += ( '\r╚' + '═══'.repeat( this._size ).substr( 1 ) + '╝' );
-		console.log( `\r[${this._address}]: Display {${palette.length},${pixels.length}}\n${display}` );
+		if ( this._debug )
+			console.log( `\r[${this._address}]: Display {${palette.length},${pixels.length}}\n${display}` );
 
 		// encode pixels
 		let bitwidth = Math.ceil( Math.log10( palette.length ) / Math.log10( 2 ) );
@@ -363,14 +389,30 @@ class Pixoo
 
 	encode_frame( palette, pixel_data, timecode = 0x00, reset_palette = false )
 	{
-		let size = ( 7 + pixel_data.length + palette.length );
-		let header = [
-			0xAA,
-			...this.__little_hex( size ),
-			...this.__little_hex( timecode ),
-			( reset_palette ? 0x01 : 0x00 ),
-			( ( palette.length == 256 ) ? 0x00 : palette.length )
-		];
+		let size = 0;
+		let header = [];
+		if ( this._size == 32 )
+		{
+			size = ( 8 + pixel_data.length + palette.length );
+			header = [
+				0xAA,
+				...this.__little_hex( size ),
+				...this.__little_hex( timecode ),
+				0x03,
+				( palette.length & 0xFF ), ( ( palette.length & 0xFF00 ) >> 8 )
+			];
+		}
+		else
+		{
+			size = ( 7 + pixel_data.length + palette.length );
+			header = [
+				0xAA,
+				...this.__little_hex( size ),
+				...this.__little_hex( timecode ),
+				( reset_palette ? 0x01 : 0x00 ),
+				( ( palette.length == 256 ) ? 0x00 : palette.length )
+			];
+		}
 
 		let frame = header;
 		for ( let color of palette )
@@ -385,7 +427,8 @@ class Pixoo
 		if ( Array.isArray( filepath ) )
 			filepath = filepath[ 0 ];
 
-		console.log( `\r[${this._address}]: SEND GIF`, filepath, speed );
+		if ( this._debug )
+			console.log( `\r[${this._address}]: SEND GIF`, filepath, speed );
 
 		index = 0;
 		let len = 1;
@@ -404,7 +447,7 @@ class Pixoo
 			let pixel_datas = [];
 			do
 			{
-				let palette, pixel_data, notimecode, nospeed;
+				let palette, pixel_data, pixels, notimecode, nospeed;
 				[ palette, pixel_data, pixels, len, notimecode, nospeed ] = this.encode_image( filepath, index );
 				let frame = this.encode_frame( palette, pixel_data, timecode );
 
@@ -421,18 +464,20 @@ class Pixoo
 			{
 				let chunk = [ ...this.__little_hex( len ), i ];
 				this.__send( 0x49, chunk.concat( frames.slice( ( i * 200 ), ( ( i + 1 ) * 200 ) ) ) );
-				if ( this._update )
-					this._update( palette, pixel_datas );
-
-				stop( false );
 			}
+
+			if ( this._update )
+			this._update( palette, pixel_datas );
+
+			stop( false );
 		}
 		catch ( error ) { stop( error ); }
 	}
 
 	draw_anim( filepaths, sent, speed = 0, loop = true, index = 0 )
 	{
-		console.log( `\r[${this._address}]: SEND ANIM`, filepaths, speed );
+		if ( this._debug )
+			console.log( `\r[${this._address}]: SEND ANIM`, filepaths, speed );
 
 		index = 0;
 		let len = filepaths.length;
@@ -467,11 +512,12 @@ class Pixoo
 			{
 				let chunk = [ ...this.__little_hex( len ), i ];
 				this.__send( 0x49, chunk.concat( frames.slice( ( i * 200 ), ( ( i + 1 ) * 200 ) ) ) );
-				if ( this._update )
-					this._update( palette, pixel_datas );
-
-				stop( false );
 			}
+
+			if ( this._update )
+			this._update( palette, pixel_datas );
+
+			stop( false );
 		}
 		catch ( error ) { stop( error ); }
 	}
@@ -502,9 +548,13 @@ class Pixoo
 			if ( !this._delay.enabled || index >= length )
 			{
 				if ( this._delay.enabled && loop )
+				{
 					this.draw_gif_delay( filepath, sent, speed, loop, 0, true );
+				}
 				else
+				{
 					stop( false );
+				}
 
 				return ;
 			}
@@ -578,7 +628,8 @@ class Pixoo
 		if ( Array.isArray( filepath ) )
 			filepath = filepath[ 0 ];
 
-		console.log( `\r[${this._address}]: SEND PIC`, filepath, ( index ? index : '' ) );
+		if ( this._debug )
+			console.log( `\r[${this._address}]: SEND PIC`, filepath, ( index ? index : '' ) );
 
 		let stop = ( e, l, s ) => {
 			if ( sent )
@@ -598,7 +649,7 @@ class Pixoo
 			if ( this._update )
 				this._update( palette, [ pixels ] );
 
-			stop( false, length, speed )
+			stop( false, length, speed );
 		}
 		catch ( error ) { stop( error ); }
 	}
@@ -624,7 +675,7 @@ if ( require.main === module )
 			let key = args[ i ];
 			if ( key[ 0 ] != '-' || files.length )
 			{
-				man = !fs.existsSync( args[ i ] );
+				man = !FS.existsSync( args[ i ] );
 				if ( !man )
 					files.push( args[ i ] );
 
@@ -654,7 +705,7 @@ if ( require.main === module )
 						speed = parseInt( tmp );
 					break ;
 
-				case '--x':
+				case '-x':
 				case '--scale':
 					tmp = args[ ++i ];
 					if ( parseInt( tmp ) == tmp && tmp >= 1 )
@@ -688,8 +739,7 @@ if ( require.main === module )
 		process.exit();
 	} );
 
-	//pixoo.size = 32;
-	//pixoo.size = ( 16 * scale );
+	pixoo._size = ( 16 * scale );
 	pixoo.connect().then( () => {
 		pixoo[ mode ]( files, error => { if ( error ) console.log( error ); pixoo.close(); }, speed, !noloop );
 	} );

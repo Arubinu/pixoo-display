@@ -7,6 +7,8 @@
   "dependencies": {
     "@gumlet/gif-resize": "github:Arubinu/gif-resize#synchronous-method",
     "bluetooth-serial-port": "^2.2.7",
-    "decode-gif": "^1.0.1"
+    "deasync": "^0.1.21",
+    "decode-gif": "^1.0.1",
+    "imagemagick": "^0.1.3"
   }
 }
